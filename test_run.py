@@ -27,7 +27,7 @@ print(f"\n=== 4. 재고 조회 테스트: {ITEM_NAME} (Google Sheet) ===")
 print(lookup_inventory(ITEM_NAME))
 
 print(f"\n=== 5. 재고 변경 테스트: {ITEM_NAME} -1개 차감 (Google Sheet) ===")
-print(update_stock(ITEM_NAME, -1))
+print(update_stock(ITEM_NAME, -1, USER_ID))
 
 print(f"\n=== 6. 임계치 체크 테스트 (Google Sheet) ===")
 print(check_threshold(100))

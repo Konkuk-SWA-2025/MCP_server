@@ -7,6 +7,8 @@ from mcp.server.fastmcp import FastMCP
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import pandas as pd
+from prophet import Prophet
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -113,7 +115,7 @@ def lookup_inventory(item_name: str) -> str:
     return f"실패: 품목 '{item_name}'이(가) 시트에 존재하지 않습니다."
 
 @mcp.tool(name="update_stock")
-def update_stock(item_name: str, quantity: int) -> str:
+def update_stock(item_name: str, quantity: int, user_id: str = "system") -> str:
     if not google_service: return "구글 서비스 연결 실패"
 
     values = read_sheet(google_service, SPREADSHEET_ID, f"{SHEET_NAME}!A:B")
@@ -139,6 +141,7 @@ def update_stock(item_name: str, quantity: int) -> str:
     result = write_sheet(google_service, SPREADSHEET_ID, range_name, [[new_qty]])
     
     if result:
+        save_log(item_name, quantity, user_id, new_qty)
         return f"성공: '{item_name}' 재고 변경 완료 ({current_qty} -> {new_qty})"
     else:
         return "실패: 시트 업데이트 중 오류 발생"
@@ -168,24 +171,63 @@ def check_threshold(check_quantity: int) -> str:
 
 @mcp.tool(name="forecast_depletion")
 def forecast_depletion(item_name: str) -> str:
-    res = lookup_inventory(item_name)
-    if "실패" in res: return res
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        query = """
+            SELECT created_at as ds, snapshot_qty as y 
+            FROM logs 
+            WHERE item_name = ? AND snapshot_qty IS NOT NULL 
+            ORDER BY created_at ASC
+        """
+        df = pd.read_sql_query(query, conn, params=(item_name,))
+        conn.close()
+    except Exception as e:
+        return f"실패: DB 조회 중 오류 ({str(e)})"
+
+    if df.empty:
+        return "실패: 예측을 위한 과거 데이터(로그)가 없습니다. 'save_log'를 통해 데이터를 쌓아주세요."
     
-    import re
-    match = re.search(r'(\d+)개', res)
-    if not match: return "수량 파싱 실패"
-    
-    qty = int(match.group(1))
-    daily_usage = 2
-    
-    if qty == 0: return "이미 소진됨"
-    
-    days = qty // daily_usage
-    date = datetime.date.today() + datetime.timedelta(days=days)
-    return f"성공: '{item_name}'은 {date}경 소진 예상 (현재 {qty}개)"
+    if len(df) < 5:
+        return f"실패: 데이터가 너무 적습니다 (현재 {len(df)}개). 최소 5개 이상의 로그가 필요합니다."
+
+    try:
+        df['ds'] = pd.to_datetime(df['ds']).dt.tz_localize(None)
+        df['y'] = pd.to_numeric(df['y'])
+    except Exception as e:
+        return f"실패: 데이터 전처리 오류 ({str(e)})"
+
+
+    current_qty = df.iloc[-1]['y']
+    if current_qty <= 0:
+        return "이미 재고가 소진되었습니다."
+
+    try:
+        logging.getLogger('cmdstanpy').setLevel(logging.WARNING)
+        
+        m = Prophet(daily_seasonality=True)
+        m.fit(df)
+
+        future = m.make_future_dataframe(periods=60) 
+        forecast = m.predict(future)
+
+        current_date = pd.Timestamp.now()
+        future_forecast = forecast[forecast['ds'] > current_date]
+        
+        depletion_rows = future_forecast[future_forecast['yhat'] <= 0]
+        
+        if not depletion_rows.empty:
+            depletion_date = depletion_rows.iloc[0]['ds'].date()
+            confidence_lower = round(depletion_rows.iloc[0]['yhat_lower'], 1)
+            return f"성공(Prophet): '{item_name}'은 {depletion_date}경 소진될 것으로 예측됩니다. (현재: {current_qty}개, 예측하한선: {confidence_lower})"
+        else:
+            min_val = round(future_forecast['yhat'].min(), 1)
+            return f"성공(Prophet): 향후 60일 내에는 소진되지 않을 것으로 보입니다. (60일 후 예상 최저 재고: {min_val}개)"
+
+    except Exception as e:
+        return f"실패: 모델 학습/예측 중 오류 발생 ({str(e)})"
 
 @mcp.tool(name="save_log")
-def save_log(item_name: str, delta_qty: int, user_id: str = "system", snapshot_qty: int = None) -> str:
+def save_log(item_name: str, delta_qty: int, user_id: str = "system", snapshot_qty: int = None) -> str: #품목, 변동량, ID, 총 수량
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()

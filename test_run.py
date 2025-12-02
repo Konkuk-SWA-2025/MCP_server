@@ -10,7 +10,7 @@ from mcp_server import (
 ITEM_NAME = "A4_복사용지_80g"
 MY_SHEET_ID = "1U6_t-ZDf6_qAemvSdp7_PQ7qMdLpgzxLHCiKiueVqEg"
 USER_ID = "test_user_2"
-CHANNEL = "console_test"
+CHANNEL = "discord"
 
 print(f"=== [설정] 테스트 품목: {ITEM_NAME} / 유저: {USER_ID} ===\n")
 
@@ -46,3 +46,4 @@ print("\n" + "="*50 + "\n")
 
 print(f"=== 7. 예측 툴 테스트 (forecast_depletion) ===")
 print(forecast_depletion(ITEM_NAME, USER_ID))
+
